@@ -1,0 +1,6 @@
+---
+source template.sh
+---
+= some other page
+
+hello. this is another page, written in asciidoc, a lightweight markup language.
