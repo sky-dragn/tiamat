@@ -1,5 +1,7 @@
 source template.sh
 
+title='the homepage'
+
 function block_main {
   h1 ='tiamat example site'
 
