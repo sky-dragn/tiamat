@@ -24,8 +24,13 @@ function block_body {
 
 function block_container {
   header
-    div ='this is a header that appears on every page'
+    div
+      strong ="tiamat example site: "
+      text "this is a header that appears on every page, since it's part of the
+            base template"
+    end
     a href=/ ='go home'
+    hr
   end
 
   main

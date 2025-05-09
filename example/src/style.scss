@@ -1,10 +1,11 @@
+// this sass file will be built into a css file of the same name
+// see? we can have line comments!
+
+@import "/another_style.css";
+
 html {
   font-family: sans-serif;
 
   background: #111;
-  color: white;
-}
-
-a, a:visited {
-  color: #0f0;
+  color: #fff;
 }
