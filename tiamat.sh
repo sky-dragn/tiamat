@@ -49,10 +49,15 @@ tiamat_depfile=$tiamat_temp/dep
 # configuration #
 #################
 
+# cli options
 tiamat_verbose=''
+tiamat_dryrun=''
+tiamat_config='tiamat_config.sh'
+tiamat_use_npx=''
+
+# file handling
 tiamat_output_dir='build'
 tiamat_source_dir='src'
-tiamat_dryrun=''
 tiamat_ignore=(
   # os files
   '.DS_Store' '*/.DS_Store' 'Thumbs.db' '*/Thumbs.db'
@@ -62,17 +67,29 @@ tiamat_ignore=(
   '*.ignore' '*.ignore.*'
   'README*' '*/README*'
 )
-tiamat_md_bin=marked
+
+# tool options
+tiamat_npx_opts=(
+  tiamat_md_cmd
+  tiamat_adoc_cmd
+  tiamat_sass_cmd
+  tiamat_live_server_cmd
+)
+
+tiamat_md_cmd=(marked)
 tiamat_md_args=(--gfm)
-tiamat_adoc_bin=asciidoctor
+
+tiamat_adoc_cmd=(asciidoctor)
 tiamat_adoc_args=(
   -s # create embeddable doc
   -a showtitle # output h1
   -a skip-front-matter
 )
-tiamat_sass_bin=sass
+
+tiamat_sass_cmd=(sass)
 tiamat_sass_args=()
-tiamat_live_server_bin=live-server
+
+tiamat_live_server_cmd=(live-server)
 tiamat_live_server_args=(
   --wait=200
   --entry-file=404.html
@@ -82,8 +99,9 @@ tiamat_live_server_args=(
 # this disconnects the socket so requires a reload, but it means the page isn't
 # repeatedly opened when you save lmao
 [[ "$tiamat_restarted" ]] && tiamat_live_server_args+=(--no-browser)
+
+tiamat_fswatch_cmd=(fswatch)
 tiamat_fswatch_args=() # TODO: ignore build dir
-tiamat_config='tiamat_config.sh'
 
 # html element list
 tiamat_normal_elements+=( # start + end with nested content
@@ -110,6 +128,19 @@ tiamat_void_elements+=( # just a start tag
   img hr br
 )
 tiamat_raw_elements=(script style) # start + end tag with raw content
+
+function tiamat::postconfig {
+  if [[ "$tiamat_use_npx" ]]; then
+    for opt in "${tiamat_npx_opts[@]}"; do
+      declare -n ref=$opt
+      ref=(npx "${ref[@]}")
+    done
+  fi
+
+  # make paths absolute
+  tiamat_source_dir=$(realpath "$tiamat_source_dir")
+  tiamat_output_dir=$(realpath "$tiamat_output_dir")
+}
 
 ###########
 # helpers #
@@ -246,8 +277,10 @@ function tiamat::prefix {
 
 # run a program and prefix with its name and pid
 function tiamat::prefix_exec ( # subshell
+  local prefix=$1
+  shift
   local pid=$BASHPID
-  exec > >(tiamat::prefix "$1 $pid" >& $tiamat_stderr)
+  exec > >(tiamat::prefix "$prefix $pid" >& $tiamat_stderr)
   exec "$@"
 )
 
@@ -439,19 +472,19 @@ function tiamat::rawtag {
 
 # inline markdown block
 function tiamat::markdown {
-  tiamat::require_tool marked 'rendering inline markdown'
+  # tiamat::require_tool marked 'rendering inline markdown'
 
   tiamat::argcat "$@" |
-    command "$tiamat_md_bin" "${tiamat_md_args[@]}" |
+    command "${tiamat_md_cmd[@]}" "${tiamat_md_args[@]}" |
     tiamat::raw
 }
 
 # inline sass block - outputs a <style>
 function tiamat::sass {
-  tiamat::require_tool sass 'building inline sass'
+  # tiamat::require_tool sass 'building inline sass'
 
   tiamat::argcat "$@" |
-    command "$tiamat_sass_bin" --stdin "${tiamat_sass_args[@]}" |
+    command "${tiamat_sass_cmd[@]}" --stdin "${tiamat_sass_args[@]}" |
     tiamat::rawtag style
 }
 
@@ -541,7 +574,7 @@ function depend { tiamat::depend "$@"; }
 function sourcedep { tiamat::sourcedep "$@"; }
 
 function tiamat::mkparents {
-  mkdir -p "$(dirname "$1")"
+  mkdir -p -- "$(dirname -- "$1")"
 }
 
 # takes a source path and makes it relative to the source dir
@@ -616,7 +649,7 @@ function tiamat::read_frontmatter {
 }
 
 function tiamat::build_adoc {
-  tiamat::require_tool asciidoctor "building adoc file $1"
+  # tiamat::require_tool asciidoctor "building adoc file $1"
 
   # determine output file
   tiamat_permalink=$(tiamat::map_filename "$1")
@@ -629,7 +662,9 @@ function tiamat::build_adoc {
 
     # render adoc
     tiamat::verbose 'rendering adoc'
-    declare -g content=$(command "$tiamat_adoc_bin" "${tiamat_adoc_args[@]}" -o - "$1")
+    declare -g content=$(
+      command "${tiamat_adoc_cmd[@]}" "${tiamat_adoc_args[@]}" -o - "$1"
+    )
 
     # render page template
     tiamat::verbose 'rendering page'
@@ -640,7 +675,7 @@ function tiamat::build_adoc {
 function tiamat::build_sass {
   case "$1" in _* ) return 0; esac # ignore sass partials
 
-  tiamat::require_tool sass 'building sass file'
+  # tiamat::require_tool sass 'building sass file'
 
   local out=$tiamat_output_dir$(tiamat::output_name "$1").css
 
@@ -649,7 +684,7 @@ function tiamat::build_sass {
   [[ "$tiamat_dryrun" ]] && return 0
 
   tiamat::mkparents "$out"
-  command "$tiamat_sass_bin" "${tiamat_sass_args[@]}" "$1" "$out"
+  command "${tiamat_sass_cmd[@]}" "${tiamat_sass_args[@]}" "$1" "$out"
 }
 
 # Build the outputs from the specified source file
@@ -760,15 +795,15 @@ function tiamat::restart {
 
 # Build site and host a dev server with live reloading
 function tiamat::serve_site {
-  tiamat::require_tool fswatch "running live server"
-  tiamat::require_tool live-server "running live server"
+  # tiamat::require_tool fswatch "running live server"
+  # tiamat::require_tool live-server "running live server"
 
   # ensure site is built before starting
   tiamat::build_site
 
   tiamat::log 'serving site'
 
-  tiamat::prefix_exec live-server \
+  tiamat::prefix_exec live-server "${tiamat_live_server_cmd[@]}" \
     "${tiamat_live_server_args[@]}" "$tiamat_output_dir" &
 
   # restart on USR1 (for tiamat::restart hot reloading)
@@ -776,27 +811,29 @@ function tiamat::serve_site {
   # trap 'tiamat::restart' SIGUSR1
 
   # listen for updates and send to build
-  < <(fswatch "${tiamat_fswatch_args[@]}" -r -0 . || :) \
-    tiamat::build_files_deps || : &
+  < <(
+    command "${tiamat_fswatch_cmd[@]}" "${tiamat_fswatch_args[@]}" -r -0 . || :
+  ) tiamat::build_files_deps || : &
 
   wait
 }
 
 function tiamat::show_usage {
-  cat <<EOF
+  cat > $tiamat_stderr <<end
 usage: $0 [global options] command
 global opts:
-  --version: show tiamat version
+  -V --version: show tiamat version
   -h --help: show this help
   -v --verbose: show extra logging info
   -n --dryrun: don't actually modify files
   -c --config: specify config path (reads tiamat_config.sh by default)
+  -x --npx: access js-based tools using npx
 commands:
   build [file]
     build the site (or a single specified source file)
   serve
     build the site and serve on localhost (options passed to live-server)
-EOF
+end
   exit "${1:-0}"
 }
 
@@ -808,10 +845,11 @@ function tiamat::show_version {
 # main options
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
-    --version ) tiamat::show_version ;;
+    -V | --version ) tiamat::show_version ;;
     -h | --help    ) tiamat::show_usage 0 ;;
     -v | --verbose ) tiamat_verbose=1 ;;
     -n | --dryrun  ) tiamat_dryrun=1 ;;
+    -x | --npx     ) tiamat_use_npx=1 ;;
     -c | --config  )
       shift
       tiamat_config=$2 || tiamat::show_usage 1
@@ -825,17 +863,16 @@ done
 # TODO: error if not found
 [[ -f "$tiamat_config" ]] && source "$tiamat_config"
 
-# make paths absolute
-tiamat_source_dir=$(realpath "$tiamat_source_dir")
-tiamat_output_dir=$(realpath "$tiamat_output_dir")
+tiamat::postconfig
 
 # command
 case "${1:-}" in
+  version ) tiamat::show_version ;;
+  help    ) tiamat::show_usage 0 ;;
+
   build   ) tiamat::build_site ;;
   serve   ) tiamat::serve_site ;;
 
-  version ) tiamat::show_version ;;
-  help    ) tiamat::show_usage 0 ;;
   *       ) tiamat::show_usage 1 ;;
 esac
 
