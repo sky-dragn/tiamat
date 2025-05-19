@@ -44,6 +44,7 @@ shopt -s inherit_errexit
 # tmp file setup
 tiamat_temp=$(mktemp -d)
 tiamat_depfile=$tiamat_temp/dep
+tiamat_outfile=$tiamat_temp/out
 
 #################
 # configuration #
@@ -545,6 +546,7 @@ function tiamat::render_template {
   tiamat::mkparents "$out"
   touch "$out" || tiamat::fail "could not open output file '$out'"
 
+  tiamat::output "$out"
   tiamat::root {tiamat_render_fd}>"$out" || tiamat::fail 'failed to render document'
 
   set +u # seemingly a bash bug, the length of an empty array is "unbound"
@@ -572,6 +574,19 @@ function tiamat::sourcedep {
 # TODO: avoid namespace pollution?
 function depend { tiamat::depend "$@"; }
 function sourcedep { tiamat::sourcedep "$@"; }
+
+# keys: output files, values: source originating those files
+declare -A tiamat_sources
+
+# declare that a file will be output, and fail if another source file has
+# already output it
+function tiamat::output {
+  [[ "${tiamat_sources[$1]:-}" ]] &&
+    [[ "${tiamat_sources[$1]}" != "$tiamat_source_file" ]] &&
+    tiamat::fail "output file conflict: source file $tiamat_source_file wants to output $1, but that file is already output by ${tiamat_sources[$1]}"
+
+  echo "$1" >& $tiamat_outfd
+}
 
 function tiamat::mkparents {
   mkdir -p -- "$(dirname -- "$1")"
@@ -610,6 +625,7 @@ function tiamat::build_passthru {
   [[ "$tiamat_dryrun" ]] && return 0
 
   tiamat::mkparents "$out"
+  tiamat::output "$out"
   cp "$1" "$out"
 }
 
@@ -684,6 +700,7 @@ function tiamat::build_sass {
   [[ "$tiamat_dryrun" ]] && return 0
 
   tiamat::mkparents "$out"
+  tiamat::output "$out"
   command "${tiamat_sass_cmd[@]}" "${tiamat_sass_args[@]}" "$1" "$out"
 }
 
@@ -701,12 +718,13 @@ function tiamat::build_file {
   done
 
   # open + truncate depfile
-  exec {tiamat_depfd}> $tiamat_depfile
+  exec {tiamat_depfd}> $tiamat_depfile {tiamat_outfd}> $tiamat_outfile
 
   # TODO: for each file, first check if it has an associated .proc.sh file
   # which will be run to process it instead of dealing with the file itself
 
   # if not, then process the file directly
+  tiamat_source_file=$1
   case "$1" in
     # files processed by other tools
     # *.md   | *.markdown ) ;;
@@ -730,28 +748,43 @@ function tiamat::build_file {
   esac
 
   # store deps
-  exec {tiamat_depfd}>&- # close
+  exec {tiamat_depfd}>&- {tiamat_outfd}>&-
   tiamat_dependencies[$1]=$(<"$tiamat_depfile")
+  while IFS= read -r out; do
+    tiamat_sources[$out]=$1
+  done < "$tiamat_outfile"
 }
 
 # build a file and files that depend on it
+# if the file was deleted, remove from build list
 function tiamat::build_file_deps {
   case "$1" in "$tiamat_output_dir"* )
     return
   ;; esac
-  tiamat::log "detected change in $1 ..."
-  case "$1" in "$tiamat_source_dir"* )
-    tiamat::build_file "$1"
-    tiamat::log "  rebuilding $1"
-  ;; esac
+  if [[ -e "$1" ]]; then
+    tiamat::log "detected change in $1 ..."
+    case "$1" in "$tiamat_source_dir"* )
+      tiamat::build_file "$1"
+      tiamat::log "  rebuilding $1"
+    ;; esac
 
-  local file
-  for file in "${!tiamat_dependencies[@]}"; do
-    if tiamat::arrstr_contains "$1" "${tiamat_dependencies[$file]}"; then
-      tiamat::build_file "$file"
-      tiamat::log "  rebuilding $file"
-    fi
-  done
+    local file
+    for file in "${!tiamat_dependencies[@]}"; do
+      if tiamat::arrstr_contains "$1" "${tiamat_dependencies[$file]}"; then
+        tiamat::build_file "$file"
+        tiamat::log "  rebuilding $file"
+      fi
+    done
+  else
+    tiamat::log "file deleted: $1"
+    for out in "${!tiamat_sources[@]}"; do
+      if [[ "${tiamat_sources[$out]}" = "$1" ]]; then
+        unset tiamat_sources[$out]
+        tiamat::log "  deleting output file $out"
+        [[ ! "$tiamat_dryrun" ]] && rm "$out"
+      fi
+    done
+  fi
 }
 
 # Builds each file specified from stdin (nul-separated)
