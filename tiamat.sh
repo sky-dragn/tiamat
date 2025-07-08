@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # tiamat: the chaotic evil static site generator
-# version 0.0.1 (it's not done yet)
+# version 0.0.2 (it pretty much works)
 # by sky <sky@dragn.xyz>
 # SPDX-License-Identifier: MIT
 # i'm sorry but also not sorry
