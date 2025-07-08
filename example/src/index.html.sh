@@ -1,5 +1,4 @@
-source template.sh
-tiamat::depend template.sh
+sourcedep //template.sh
 
 title='the homepage'
 

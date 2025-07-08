@@ -1,5 +1,3 @@
-source tiamat.sh
-
 function tiamat::root {
   tiamat::template
 

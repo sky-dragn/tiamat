@@ -1,7 +1,5 @@
 ---
-source template.sh # yes, the frontmatter is a bash script as well. deal with it
-tiamat::depend template.sh
-
+sourcedep //template.sh # yes, the frontmatter is a bash script as well. deal with it
 title='some other page'
 ---
 = some other page

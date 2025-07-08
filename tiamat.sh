@@ -6,6 +6,15 @@
 # SPDX-License-Identifier: MIT
 # i'm sorry but also not sorry
 
+##################
+# initialization #
+##################
+
+if ! [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then
+  echo "tiamat requires bash >= 4 (running $BASH_VERSION)" >&2
+  exit 1
+fi
+
 # "include guard" - don't redefine stuff if it's already been loaded
 if [[ "${tiamat_loaded:-}" -eq 1 ]]; then
   tiamat::verbose 'already sourced, skipping'
@@ -21,18 +30,14 @@ tiamat_sourced=''
 # we've restarted - this can be used for config defaults
 tiamat_restarted=''
 [[ "${TIAMAT_STARTED:-}" ]] && tiamat_restarted=1
-export TIAMAT_STARTED=$$
-
-if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
-  echo "tiamat requires bash >= 4 (running $BASH_VERSION)" >&2
-  exit 1
-fi
+export TIAMAT_STARTED=$BASHPID
 
 declare -r tiamat_version=0.0.1
 
+# needed for restarting
 tiamat_pid=$BASHPID
 tiamat_orig_args=("$@")
-tiamat_source=$(realpath "${BASH_SOURCE[0]}")
+tiamat_source=$(realpath -- "${BASH_SOURCE[0]}")
 
 # clone fds for later use
 exec {tiamat_stdin}<&0
@@ -50,6 +55,7 @@ shopt -s extglob
 tiamat_temp=$(mktemp -d)
 tiamat_depfile=$tiamat_temp/dep
 tiamat_outfile=$tiamat_temp/out
+tiamat_frontmatter=$tiamat_temp/frontmatter
 
 #################
 # configuration #
@@ -62,10 +68,13 @@ tiamat_config='tiamat_config.sh'
 tiamat_use_npx=''
 
 # file handling
-tiamat_output_dir='build'
-tiamat_source_dir='src'
+tiamat_root_path="$(realpath -s -- "$(dirname -- "${BASH_SOURCE[0]}")")" # dir containing tiamat.sh
+tiamat_output_path='//build' # given as a srcpath (// is root)
+tiamat_source_path='//src'   # "
 # patterns match all subdirs TODO: except if prefixed with /
 tiamat_ignore=(
+  # sass partials
+  '_*([^/]).@(sass|scss)'
   # os files
   '.DS_Store' 'Thumbs.db'
   # vcs files
@@ -76,6 +85,19 @@ tiamat_ignore=(
   # explicitly ignored + internal doc
   '*.ignore' '*.ignore.*'
   'README*'
+)
+tiamat_handlers=(
+#  '*.@(md|markdown)'   tiamat::build_markdown
+  '*.adoc'      tiamat::build_adoc
+  '*.asciidoc'  tiamat::build_adoc
+  '*.sass'      tiamat::build_sass
+  '*.scss'      tiamat::build_sass
+  '*.html.sh'   tiamat::build_plain
+  '*.css'       tiamat::build_passthru
+  '*.jpg'       tiamat::build_passthru
+  '*.png'       tiamat::build_passthru
+  '*.webp'      tiamat::build_passthru
+  '*.svg'       tiamat::build_passthru
 )
 
 # tool options
@@ -140,6 +162,7 @@ tiamat_void_elements+=( # just a start tag
 )
 tiamat_raw_elements=(script style) # start + end tag with raw content
 
+# post-process configs into more usable values
 function tiamat::postconfig {
   if [[ "$tiamat_use_npx" ]]; then
     for opt in "${tiamat_npx_opts[@]}"; do
@@ -148,9 +171,9 @@ function tiamat::postconfig {
     done
   fi
 
-  # make paths absolute
-  tiamat_source_dir=$(realpath "$tiamat_source_dir")
-  tiamat_output_dir=$(realpath "$tiamat_output_dir")
+  # resolve paths
+  tiamat_source_path=$(tiamat::srcpath "$tiamat_source_path")
+  tiamat_output_path=$(tiamat::srcpath "$tiamat_output_path")
 }
 
 ###########
@@ -164,9 +187,9 @@ function tiamat::arr_contains {
   # ENDPARAMS
   shift
 
-  local i
-  for i in "$@"; do
-    [[ "$i" = "$needle" ]] && return 0
+  local entry
+  for entry in "$@"; do
+    [[ "$needle" = "$entry" ]] && return 0
   done
   return 1
 }
@@ -179,6 +202,7 @@ function tiamat::arrstr_matches {
 
   local pat
   while IFS= read -r pat; do
+    # shellcheck disable=SC2053
     [[ "$needle" = $pat ]] && return 0
   done <<< "$haystack"
   return 1
@@ -192,7 +216,14 @@ function tiamat::log {
   # param @: message
   # ENDPARAMS
 
-  echo "[tiamat $BASHPID]" "$@" >& $tiamat_stderr
+  echo "[tiamat $BASHPID] $*" >& "$tiamat_stderr"
+}
+
+function tiamat::warn {
+  # param @: message
+  # ENDPARAMS
+
+  tiamat::log "warning: $*"
 }
 
 # log only in verbose mode
@@ -206,10 +237,10 @@ function tiamat::backtrace {
   local depth=${1:-0}
   # ENDPARAMS
 
-  echo "backtrace (pid $BASHPID):" >& $tiamat_stderr
+  echo "backtrace (pid $BASHPID):" >& "$tiamat_stderr"
   local frame=''
   while frame=$(builtin caller "$depth"); do
-    echo "  $frame" >& $tiamat_stderr
+    echo "  $frame" >& "$tiamat_stderr"
     depth=$(( depth + 1 ))
   done
 }
@@ -231,12 +262,19 @@ function tiamat::todo {
   tiamat::fail 'unimplemented'
 }
 
+# use like [[ CONDITION ]] || tiamat::assert
+function tiamat::assert {
+  # no params
+
+  tiamat::fail 'assertion failed'
+}
+
 # cnf handler (print backtrace)
 function tiamat::command_not_found {
   # param @: failed command
   # endparams
 
-  echo "$1: command not found" >& $tiamat_stderr
+  echo "$1: command not found" >& "$tiamat_stderr"
   tiamat::backtrace 2
   return 127
 }
@@ -250,6 +288,7 @@ function tiamat::strict {
     tiamat::command_not_found "$@" || return "$?"
   }
   trap tiamat::backtrace ERR
+  trap tiamat::backtrace EXIT
 }
 
 # exit strict mode
@@ -259,6 +298,7 @@ function tiamat::unstrict {
   set +u
   unset -f command_not_found_handle || :
   trap - ERR
+  trap - EXIT
 }
 
 # enter strict mode asap if we're not sourced by someone else
@@ -288,16 +328,16 @@ trap 'tiamat::cleanup TERM || exit $?' SIGTERM
 function tiamat::debug {
   # no params
 
-  echo "entering debug repl, exit with 'end'" >& $tiamat_stderr
+  echo "entering debug repl, exit with 'end'" >& "$tiamat_stderr"
   local ret=0
   while :; do
     [[ "$ret" -eq 0 ]] && ret=''
     local line
-    <& $tiamat_stdin read -rep "tiamat${ret:+ }$ret> " line || return 0
+    <& "$tiamat_stdin" read -rep "tiamat${ret:+ }$ret> " line || return 0
     [[ "$line" == end ]] && return
     if [[ "$line" ]]; then
       tiamat::unstrict
-      eval "$line" <& $tiamat_stdin >& $tiamat_stdout 2>& $tiamat_stderr
+      eval "$line" <& "$tiamat_stdin" >& "$tiamat_stdout" 2>& "$tiamat_stderr"
       ret=$?
       tiamat::strict
     fi
@@ -331,7 +371,8 @@ function tiamat::prefix {
 }
 
 # run a command and prefix with its name and pid
-function tiamat::log_exec ( # subshell
+# must run in subshell
+function tiamat::log_exec {
   local name=$1
   # param @: command to run
   # ENDPARAMS
@@ -340,7 +381,7 @@ function tiamat::log_exec ( # subshell
   local pid=$BASHPID
   exec > >(tiamat::prefix "[$name $pid] " >& $tiamat_stderr)
   exec "$@"
-)
+}
 
 ##############
 # templating #
@@ -363,7 +404,7 @@ function tiamat::raw {
   # param @: text to output
   # ENDPARAMS
 
-  tiamat::argcat "$@" >& $tiamat_render_fd
+  tiamat::argcat "$@" >& "$tiamat_render_fd"
 }
 
 # html-escapes the input from stdin
@@ -371,7 +412,13 @@ function tiamat::escape {
   # no params
 
   # from ruakh on stackoverflow
-  sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'"'"'/\&#39;/g'
+  sed '
+    s/&/\&amp;/g;
+    s/</\&lt;/g;
+    s/>/\&gt;/g;
+    s/"/\&quot;/g;
+    s/'"'"'/\&#39;/g
+  '
 }
 
 # outputs an escaped string
@@ -447,6 +494,7 @@ function tiamat::begin {
   # param @: attribute options
   # ENDPARAMS
   shift
+
   local nested=''
 
   case "$element" in
@@ -524,22 +572,25 @@ function tiamat::end {
     [[ "${#tiamat_element_stack[@]}" -ne 0 ]] ||
       tiamat::fail 'too many closed elements'
     set -u
+    # shellcheck disable=SC2206
     element=(${tiamat_element_stack[-1]}) # expand!
-    unset tiamat_element_stack[-1]
+    unset 'tiamat_element_stack[-1]'
   fi
 
-  tiamat::raw "</$element>"
+  tiamat::raw "</$element>" # TODO: ????
 }
 
 # outputs a tag pair with raw content included (for i.e. style, script)
 function tiamat::rawtag {
+  # TODO: shellcheck says this is the same var as prev, but it
+  # might just not understand scopes
   local element=$1
   # param @: text within tag
   # ENDPARAMS
   shift
 
   tiamat::begin "$element" # TODO: allow attrs here?
-  tiamat::raw "$@"
+  tiamat::raw "$@" # TODO: look for </$element> and warn
   tiamat::end
 }
 
@@ -585,7 +636,9 @@ function tiamat::template {
   )
 
   # atypical elements
+  # shellcheck disable=SC2317
   function comment { tiamat::raw  "<!-- $* -->"; }
+  # shellcheck disable=SC2317
   function doctype { tiamat::void !DOCTYPE "$@"; }
 
   local i
@@ -610,7 +663,8 @@ function tiamat::template {
 function tiamat::root {
   # no params
 
-  tiamat::text "$content"
+  tiamat::log "warning: $tiamat_source_file does not overwrite tiamat::root"
+  tiamat::text "$content" # TODO: fix shellcheck
 }
 
 # renderer for tiamat's builtin templating system
@@ -618,106 +672,91 @@ function tiamat::render_template {
   local out=${1:-}
   # ENDPARAMS
 
-  [[ "$out" ]] || out=${tiamat_permalink:-}
-
-  out="$tiamat_output_dir$out"
-
-  tiamat::log "-> $out"
+  [[ "$out" ]] || out=$tiamat_permalink
 
   [[ "$tiamat_dryrun" ]] && return
 
-  tiamat::mkparents "$out"
-  touch "$out" || tiamat::fail "could not open output file '$out'"
-
   tiamat::output "$out"
-  tiamat::root {tiamat_render_fd}>"$out" || tiamat::fail 'failed to render document'
+
+  tiamat::root {tiamat_render_fd}>"$(tiamat::outpath "$out")" ||
+    tiamat::fail 'failed to render document'
 
   set +u # seemingly a bash bug, the length of an empty array is "unbound"
   [[ "${#tiamat_element_stack[@]}" -eq 0 ]] ||
     tiamat::fail "unclosed element(s): ${tiamat_element_stack[*]}"
   set -u
+
+  tiamat_has_outputs=1
 }
 
 #################
 # file handling #
 #################
 
-declare -A tiamat_dependencies
+# paths
 
-# footgun: don't use *unescaped* globs here because if a new matching file is added
-# to the dir, it does not immediately count as dep... escape them to match at
-# file-detect time
-function tiamat::depend {
-  # param @: files to depend on
+# strip extension
+function tiamat::stripext {
+  local path=$1
   # ENDPARAMS
-
-  for i in "$@"; do
-    echo "$i" >& $tiamat_depfd
-  done
+  
+  echo "${path%%.*([^/])}"
 }
 
-# source a script and depend on it
-function tiamat::sourcedep {
-  # param 1: file to source and depend on
-  # param @: args passed to source
+# resolves a source path into an absolute filesystem path
+# absolute and relative paths -> resolved like normal
+# // paths -> relative to $tiamat_root_path
+function tiamat::srcpath {
+  local srcpath=$1
   # ENDPARAMS
-
-  source "$@"
-  tiamat::depend "$1"
+  
+  case "$srcpath" in
+    //* ) realpath -s -- "$tiamat_root_path/${srcpath:2}" ;;
+    *   ) realpath -s -- "$srcpath" ;;
+  esac
 }
 
-# TODO: avoid namespace pollution?
-function depend { tiamat::depend "$@"; }
-function sourcedep { tiamat::sourcedep "$@"; }
-
-# keys: output files, values: source originating those files
-declare -A tiamat_sources
-
-# declare that a file will be output, and fail if another source file has
-# already output it
-function tiamat::output {
-  local outfile=$1
-  # ENDPARAMS
-
-  [[ "${tiamat_sources[$outfile]:-}" ]] &&
-    [[ "${tiamat_sources[$outfile]}" != "$tiamat_source_file" ]] &&
-    tiamat::fail "output file conflict: \
-source file $tiamat_source_file wants to output $outfile, \
-but that file is already output by ${tiamat_sources[$outfile]}"
-
-  echo "$outfile" >& $tiamat_outfd
-}
-
-function tiamat::mkparents {
+# converts a real filesystem path into a root-relative srcpath
+function tiamat::to_srcpath {
   local path=$1
   # ENDPARAMS
 
-  mkdir -p -- "$(dirname -- "$path")"
+  printf '//'
+  realpath -s --relative-to "$tiamat_root_path" -- "$path"
 }
 
-# takes a source path and makes it relative to the source dir
-function tiamat::relative_to_output {
-  local path=$1
+# resolves an output path into an absolute filesystem path
+# relative paths -> relative to current dir's output path
+# absolute paths -> relative to $tiamat_build
+function tiamat::outpath {
+  local outpath=$1
   # ENDPARAMS
 
-  echo "${path#"$tiamat_source_dir"}"
+  case "$outpath" in
+    /* ) realpath -s -- "$tiamat_output_path$outpath" ;;
+    *  ) realpath -s -- "$tiamat_output_path/$(realpath -s --relative-to "$tiamat_source_path" -- "$outpath")" ;;
+  esac
 }
 
-# takes a source path and makes it relative to source dir w/o extension
-function tiamat::output_name {
-  local path=$1
+# directly translate srcpath into outpath
+function tiamat::outpath_for {
+  local srcpath=$1
   # ENDPARAMS
 
-  local f=$(tiamat::relative_to_output "$path")
-  echo "${f%%.*}"
+  # TODO: resolve src being different???
+  [[ "$srcpath" = //src/* ]] ||
+    tiamat::fail "outpath_for must be given a root-relative path within src dir: $srcpath"
+  echo "${srcpath##//src}" # leaves leading slash
 }
 
-# default output filename map
-function tiamat::map_filename {
+# map a srcpath to an output as a page
+function tiamat::page_outpath {
   local srcfile=$1
   # ENDPARAMS
 
-  local f=$(tiamat::output_name "$srcfile")
+  local f
+  f=$(tiamat::outpath_for "$srcfile")
+  f=$(tiamat::stripext "$f")
 
   case "$f" in
     */index ) f=$f.html ;;
@@ -728,39 +767,104 @@ function tiamat::map_filename {
   echo "$f"
 }
 
-# pass thru a file unmodified
-function tiamat::build_passthru {
-  local srcfile=$1
+# pushd, but goes to the folder containing the given srcpath
+function tiamat::pushd {
+  local srcpath=$1
   # ENDPARAMS
 
-  local out=$tiamat_output_dir$(tiamat::relative_to_output "$srcfile")
-
-  tiamat::log "-> $out"
-
-  [[ "$tiamat_dryrun" ]] && return 0
-
-  tiamat::mkparents "$out"
-  tiamat::output "$out"
-  cp "$srcfile" "$out"
+  local dir
+  dir=$(dirname -- "$(tiamat::srcpath "$srcpath")")
+  tiamat::verbose "pushd $dir"
+  pushd -- "$dir" > /dev/null
 }
 
-# build a page directly from a script
-function tiamat::build_plain {
-  local srcfile=$1
+# popd for symmetry
+function tiamat::popd {
+  tiamat::verbose 'popd'
+  popd > /dev/null
+}
+
+# source, but using a srcpath, and cd'ing to the dir
+# containing the sourced file
+function tiamat::source {
+  local srcpath=$1
+  # param @: args
+  # ENDPARAMS
+  shift
+  
+  tiamat::pushd "$srcpath"
+  tiamat::verbose "source $srcpath"
+  builtin source "$(tiamat::srcpath "$srcpath")" "$@"
+  tiamat::popd
+}
+
+# mkdir's the parent dirs of a given file
+function tiamat::mkparents {
+  local path=$1
   # ENDPARAMS
 
-  # determine output file
-  tiamat_permalink=$(tiamat::map_filename "$srcfile")
-
-  tiamat::verbose 'entering subshell'
-  (
-    tiamat::verbose 'sourcing page'
-    source "$srcfile"
-    # the script itself contains the render_template call
-    # it can also have multiple!
-  )
+  mkdir -p -- "$(dirname -- "$path")"
 }
 
+# dependencies
+
+declare -A tiamat_dependencies
+
+# declares that this script depends on another for incremental building
+# footgun: don't use *unescaped* globs here because if a new matching file is added
+# to the dir, it does not immediately count as dep... escape them to match at
+# file-detect time
+function tiamat::depend {
+  # param @: files to depend on
+  # ENDPARAMS
+
+  for i in "$@"; do
+    echo "$i" >& "$tiamat_depfd"
+  done
+}
+
+# source a script and depend on it
+function tiamat::sourcedep {
+  local file=$1
+  # param @: args passed to source
+  # ENDPARAMS
+  shift
+
+  tiamat::source "$file" "$@"
+  tiamat::depend "$file"
+}
+
+# TODO: avoid namespace pollution?
+function depend { tiamat::depend "$@"; }
+function sourcedep { tiamat::sourcedep "$@"; }
+
+# misc
+
+# keys: output files, values: source originating those files
+declare -A tiamat_sources
+
+# declare that a file will be output, prep output dir,
+# and fail if another source file has already output it
+# returns non-zero if dryrun
+function tiamat::output {
+  local outfile=$1
+  # ENDPARAMS
+
+  [[ "${tiamat_sources[$outfile]:-}" ]] &&
+    [[ "${tiamat_sources[$outfile]}" != "$tiamat_source_file" ]] &&
+    tiamat::fail "output file conflict: \
+source file $tiamat_source_file wants to output $outfile, \
+but that file is already output by ${tiamat_sources[$outfile]}"
+
+  tiamat::log "$tiamat_source_file -> $outfile"
+  echo "$outfile" >& $tiamat_outfd
+
+  [[ "$tiamat_dryrun" ]] && return 1
+
+  tiamat::mkparents "$(tiamat::outpath "$outfile")" || tiamat::assert
+}
+
+# strip frontmatter from between '---' tags for markup files and pipe out
 function tiamat::read_frontmatter {
   local srcfile=$1
   # ENDPARAMS
@@ -782,33 +886,95 @@ function tiamat::read_frontmatter {
     END {
       exit inblock
     }
-  ' "$srcfile" || return $?
+  ' "$(tiamat::srcpath "$srcfile")" || return $?
+}
+
+function tiamat::source_frontmatter {
+  local srcfile=$1
+
+  local frontmatter
+  frontmatter="$tiamat_frontmatter/\
+$(realpath --relative-to "$tiamat_source_path" -- "$(tiamat::srcpath "$srcfile")")"
+  [[ "$frontmatter" = ..* ]] && tiamat::assert
+
+  # put in file so that it shows up in backtrace
+  tiamat::mkparents "$frontmatter" || tiamat::assert
+  tiamat::read_frontmatter "$srcfile" > "$frontmatter"
+  tiamat::pushd "$srcfile"
+  tiamat::verbose "source $frontmatter"
+  builtin source "$frontmatter"
+  tiamat::popd
+}
+
+#################
+# file handlers #
+#################
+
+# pass thru a file unmodified
+function tiamat::build_passthru {
+  local srcfile=$1
+  # ENDPARAMS
+
+  local out
+  out=$(tiamat::outpath_for "$srcfile")
+
+  tiamat::output "$out" || return 0
+
+  cp "$(tiamat::srcpath "$srcfile")" "$(tiamat::outpath "$out")"
+}
+
+# build a page directly from a script
+function tiamat::build_plain {
+  local srcfile=$1
+  # ENDPARAMS
+
+  (
+    tiamat::strict
+    declare -g tiamat_permalink
+    tiamat_permalink=$(tiamat::page_outpath "$srcfile")
+
+    declare -g tiamat_has_outputs=''
+
+    tiamat::verbose 'sourcing page'
+    tiamat::source "$srcfile"
+    
+    # the script itself contains the render_template call
+    # it can also have multiple!
+    [[ "$tiamat_has_outputs" ]] || tiamat::log "warning: no pages output from $srcfile"
+    
+    tiamat::unstrict
+  )
 }
 
 function tiamat::build_adoc {
   local srcfile=$1
   # ENDPARAMS
 
-  # tiamat::require_tool asciidoctor "building adoc file $1"
-
-  # determine output file
-  tiamat_permalink=$(tiamat::map_filename "$srcfile")
-
-  tiamat::verbose 'entering subshell'
+  # tiamat::require_tool asciidoctor "building adoc file $srcfile"
   (
-    # execute frontmatter
-    tiamat::verbose 'running frontmatter'
-    eval "$(tiamat::read_frontmatter "$1")"
+    tiamat::strict
+    # determine output file
+    declare -g tiamat_permalink
+    tiamat_permalink=$(tiamat::page_outpath "$srcfile")
+
+    # eval frontmatter
+    tiamat::source_frontmatter "$srcfile"
 
     # render adoc
     tiamat::verbose 'rendering adoc'
-    declare -g content=$(
-      command "${tiamat_adoc_cmd[@]}" "${tiamat_adoc_args[@]}" -o - "$srcfile"
+    declare -g content
+    content=$(
+      command "${tiamat_adoc_cmd[@]}" \
+        "${tiamat_adoc_args[@]}" \
+        -o - \
+        "$(tiamat::srcpath "$srcfile")"
     )
 
     # render page template
     tiamat::verbose 'rendering page'
     tiamat::render_template "$tiamat_permalink"
+
+    tiamat::unstrict
   )
 }
 
@@ -816,21 +982,23 @@ function tiamat::build_sass {
   local srcfile=$1
   # ENDPARAMS
 
-  # ignore sass partials
-  [[ "$srcfile" = */_*([^/]) ]] && return 0
-
   # tiamat::require_tool sass 'building sass file'
+  
+  local out
+  out="$(tiamat::outpath_for "$srcfile")"
+  out="$(tiamat::stripext "$out").css"
 
-  local out=$tiamat_output_dir$(tiamat::output_name "$srcfile").css
+  tiamat::output "$out" || return 0
 
-  tiamat::log "-> $out"
-
-  [[ "$tiamat_dryrun" ]] && return 0
-
-  tiamat::mkparents "$out"
-  tiamat::output "$out"
-  command "${tiamat_sass_cmd[@]}" "${tiamat_sass_args[@]}" "$srcfile" "$out"
+  command "${tiamat_sass_cmd[@]}" \
+    "${tiamat_sass_args[@]}" \
+    "$(tiamat::srcpath "$srcfile")" \
+    "$(tiamat::outpath "$out")"
 }
+
+###############
+# build flows #
+###############
 
 function tiamat::is_ignored {
   local srcfile=$1
@@ -838,8 +1006,9 @@ function tiamat::is_ignored {
 
   local ignore
   for ignore in "${tiamat_ignore[@]}"; do
+    # shellcheck disable=SC2254
     case "$srcfile" in $ignore | */$ignore )
-      tiamat::verbose "skipping ignored: $1"
+      tiamat::verbose "skipping ignored: $srcfile"
       return 0
     ;; esac
   done
@@ -855,40 +1024,40 @@ function tiamat::build_file {
   tiamat::verbose "building $srcfile"
 
   # open + truncate depfile
-  exec {tiamat_depfd}> $tiamat_depfile {tiamat_outfd}> $tiamat_outfile
+  exec {tiamat_depfd}> "$tiamat_depfile" {tiamat_outfd}> "$tiamat_outfile"
 
   # TODO: for each file, first check if it has an associated .proc.sh file
   # which will be run to process it instead of dealing with the file itself
 
   # if not, then process the file directly
   tiamat_source_file=$srcfile # for use by scripts
-  case "$srcfile" in
-    # files processed by other tools
-    # *.md   | *.markdown ) ;;
-    *.adoc | *.asciidoc ) tiamat::build_adoc "$srcfile" ;;
-    *.sass | *.scss ) tiamat::build_sass "$srcfile" ;;
-    # for output html files
-    *.html.sh ) tiamat::build_plain "$srcfile" ;;
-    # *.proc.sh ) ;;
-    # other sh files only run if i.e. sourced
+  
+  local nhandlers=$(( ${#tiamat_handlers[@]} / 2 ))
+  local handled=''
+  local i
+  for (( i=0; i<nhandlers; i++ )); do
+    local pat=${tiamat_handlers[$((i*2))]}
+    local handler=${tiamat_handlers[$((i*2+1))]}
 
-    # plain files to pass through
-    *.css | *.jpg | *.png | *.webp | *.svg )
-      tiamat::build_passthru "$srcfile"
-    ;;
-
-    * )
-      tiamat::verbose "skipping unknown"
-      exec {tiamat_depfd}>&-
-      return
-    ;;
-  esac
-
-  # store deps
+    if [[ "$srcfile" = $pat ]]; then
+      handled=1
+      "$handler" "$srcfile"
+      break
+    fi
+  done
+  
   exec {tiamat_depfd}>&- {tiamat_outfd}>&-
+  
+  if [[ ! "$handled" ]]; then
+    tiamat::log "warning: non-ignored file not handled: $srcfile"
+    return 0
+  fi
+
+  # store deps and list of output files
   tiamat_dependencies[$srcfile]=$(<"$tiamat_depfile")
   while IFS= read -r out; do
-    tiamat_sources[$out]=$1
+    [[ "${tiamat_sources[$out]:-$srcfile}" = "$srcfile" ]] || tiamat::assert
+    tiamat_sources[$out]=$srcfile
   done < "$tiamat_outfile"
 }
 
@@ -898,35 +1067,39 @@ function tiamat::build_file_deps {
   local srcfile=$1
   # ENDPARAMS
 
-  case "$srcfile" in "$tiamat_output_dir"* )
-    return
-  ;; esac
-
+  local realsrc
+  realsrc=$(tiamat::srcpath "$srcfile")
+  
+  # skip build dir
+  # TODO: do this filter on the actual find
+  [[ "$realsrc" = "$tiamat_output_path/"* ]] && return 0
+  
   tiamat::is_ignored "$srcfile" && return 0
 
-  if [[ -e "$srcfile" ]]; then
+  if [[ -e "$realsrc" ]]; then
     tiamat::log "detected change in $srcfile ..."
-    if [[ "$srcfile" = "$tiamat_source_dir/"* ]]; then
-      tiamat::build_file "$srcfile"
+    if [[ "$realsrc" = "$tiamat_source_path/"* ]]; then
       tiamat::log "  rebuilding $srcfile"
+      tiamat::build_file "$srcfile"
     fi
 
-    local file
-    for file in "${!tiamat_dependencies[@]}"; do
-      # don't depend on self
-      [[ "$file" -ef "$srcfile" ]] && continue
-      if tiamat::arrstr_matches "$srcfile" "${tiamat_dependencies[$file]}"; then
-        tiamat::build_file "$file"
-        tiamat::log "  rebuilding $file"
+    local dependent
+    for dependent in "${!tiamat_dependencies[@]}"; do
+      # avoid circular deps
+      [[ "$dependent" = "$srcfile" ]] && continue
+
+      if tiamat::arrstr_matches "$srcfile" "${tiamat_dependencies[$dependent]}"; then
+        tiamat::log "  rebuilding $dependent"
+        tiamat::build_file "$dependent"
       fi
     done
   else
     tiamat::log "file deleted: $srcfile"
     for out in "${!tiamat_sources[@]}"; do
       if [[ "${tiamat_sources[$out]}" = "$srcfile" ]]; then
-        unset tiamat_sources[$out]
+        unset tiamat_sources\["$out"\]
         tiamat::log "  deleting output file $out"
-        [[ ! "$tiamat_dryrun" ]] && rm "$out"
+        [[ ! "$tiamat_dryrun" ]] && rm "$(tiamat::outpath out)"
       fi
     done
   fi
@@ -937,7 +1110,8 @@ function tiamat::build_file_deps {
 function tiamat::build_files {
   local file
   while IFS= read -rd $'\0' file; do
-    tiamat::build_file "$file"
+    tiamat::verbose "$file"
+    tiamat::build_file "$(tiamat::to_srcpath "$file")"
   done
 }
 
@@ -949,7 +1123,10 @@ function tiamat::build_files_deps {
     case "$file" in
       # TODO: fix hot reload, currently it doesn't clean up properly
       # "$tiamat_source" ) kill -USR1 $tiamat_pid ;;
-      * ) tiamat::build_file_deps "$file" ;;
+      * )
+        local f
+        f=$(tiamat::to_srcpath "$file")
+        tiamat::build_file_deps "$f" ;;
     esac
   done
 }
@@ -961,7 +1138,7 @@ function tiamat::build_files_deps {
 # Discover all source files and build them
 function tiamat::build_site {
   tiamat::log 'building site'
-  < <(find "$tiamat_source_dir" -type f -print0) tiamat::build_files
+  < <(find "$tiamat_source_path" -type f -print0) tiamat::build_files
 }
 
 # Restart the outer tiamat process, reloading all script sources
@@ -981,8 +1158,10 @@ function tiamat::serve_site {
 
   tiamat::log 'serving site'
 
-  tiamat::log_exec live-server "${tiamat_live_server_cmd[@]}" \
-    "${tiamat_live_server_args[@]}" "$tiamat_output_dir" &
+  (
+    tiamat::log_exec live-server "${tiamat_live_server_cmd[@]}" \
+      "${tiamat_live_server_args[@]}" "$tiamat_output_path"
+  ) &
 
   # restart on USR1 (for tiamat::restart hot reloading)
   # TODO: fix hot reload, currently it doesn't clean up properly
@@ -1042,16 +1221,16 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # TODO: error if not found except if default
-[[ -f "$tiamat_config" ]] && source "$tiamat_config"
+[[ -f "$tiamat_config" ]] && builtin source "$tiamat_config"
 
 tiamat::postconfig
 
 # run subcommand unless sourced as library
 if [[ ! "$tiamat_sourced" ]]; then
-  local subcommand=${1:-}
+  tiamat_subcommand=${1:-}
   shift
 
-  case "$subcommand" in
+  case "$tiamat_subcommand" in
     version ) tiamat::show_version "$@" ;;
     help    ) tiamat::show_usage 0 ;;
 
