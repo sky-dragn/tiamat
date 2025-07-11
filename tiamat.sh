@@ -663,7 +663,7 @@ function tiamat::template {
 function tiamat::root {
   # no params
 
-  tiamat::log "warning: $tiamat_source_file does not overwrite tiamat::root"
+  tiamat::warn "$tiamat_source_file does not overwrite tiamat::root"
   tiamat::text "$content" # TODO: fix shellcheck
 }
 
@@ -699,7 +699,7 @@ function tiamat::render_template {
 function tiamat::stripext {
   local path=$1
   # ENDPARAMS
-  
+
   echo "${path%%.*([^/])}"
 }
 
@@ -709,7 +709,7 @@ function tiamat::stripext {
 function tiamat::srcpath {
   local srcpath=$1
   # ENDPARAMS
-  
+
   case "$srcpath" in
     //* ) realpath -s -- "$tiamat_root_path/${srcpath:2}" ;;
     *   ) realpath -s -- "$srcpath" ;;
@@ -720,6 +720,11 @@ function tiamat::srcpath {
 function tiamat::to_srcpath {
   local path=$1
   # ENDPARAMS
+
+  # do nothing if already a srcpath
+  if [[ "$path" = //* ]]; then
+    echo "$path"
+  fi
 
   printf '//'
   realpath -s --relative-to "$tiamat_root_path" -- "$path"
@@ -784,17 +789,64 @@ function tiamat::popd {
   popd > /dev/null
 }
 
-# source, but using a srcpath, and cd'ing to the dir
-# containing the sourced file
+# sourcing and frontmatter
+
+# strip frontmatter from between '---' tags for markup files and pipe out
+function tiamat::read_frontmatter {
+  local srcfile=$1
+  # ENDPARAMS
+
+  awk '
+    $0 == "---" {
+      if (inblock) {
+        inblock = 0
+        exit
+      }
+      inblock = 1
+      next
+    }
+    {
+      if (inblock) print $0
+      else exit
+    }
+    # if not closed, error
+    END {
+      exit inblock
+    }
+  ' "$(tiamat::srcpath "$srcfile")" || return $?
+}
+
+# source with superpowers:
+# - accepts a srcpath
+# - if the script is a dir then it looks for
+# - automatically cd's to the dir containing the script
+# - can source a non-script file containing frontmatter
 function tiamat::source {
   local srcpath=$1
   # param @: args
   # ENDPARAMS
   shift
-  
+
   tiamat::pushd "$srcpath"
   tiamat::verbose "source $srcpath"
-  builtin source "$(tiamat::srcpath "$srcpath")" "$@"
+  case "$srcpath" in
+
+    *.sh ) builtin source "$(tiamat::srcpath "$srcpath")" "$@" ;;
+
+    *.adoc | *.md ) # TODO
+      local frontmatter
+      frontmatter="$tiamat_frontmatter/\
+$(realpath -s --relative-to "$tiamat_source_path" -- "$(tiamat::srcpath "$srcfile")")"
+      [[ "$frontmatter" = ..* ]] && tiamat::assert
+
+      # put in file so that it shows up in backtrace
+      tiamat::mkparents "$frontmatter" || tiamat::assert
+      tiamat::read_frontmatter "$srcfile" > "$frontmatter"
+      tiamat::verbose "frontmatter at $frontmatter"
+      builtin source "$frontmatter" "$@"
+    ;;
+  esac
+
   tiamat::popd
 }
 
@@ -818,8 +870,11 @@ function tiamat::depend {
   # param @: files to depend on
   # ENDPARAMS
 
+  local i
   for i in "$@"; do
+    i=$(tiamat::to_srcpath "$i")
     echo "$i" >& "$tiamat_depfd"
+    tiamat::verbose "added dependency $i"
   done
 }
 
@@ -864,48 +919,6 @@ but that file is already output by ${tiamat_sources[$outfile]}"
   tiamat::mkparents "$(tiamat::outpath "$outfile")" || tiamat::assert
 }
 
-# strip frontmatter from between '---' tags for markup files and pipe out
-function tiamat::read_frontmatter {
-  local srcfile=$1
-  # ENDPARAMS
-
-  awk '
-    $0 == "---" {
-      if (inblock) {
-        inblock = 0
-        exit
-      }
-      inblock = 1
-      next
-    }
-    {
-      if (inblock) print $0
-      else exit
-    }
-    # if not closed, error
-    END {
-      exit inblock
-    }
-  ' "$(tiamat::srcpath "$srcfile")" || return $?
-}
-
-function tiamat::source_frontmatter {
-  local srcfile=$1
-
-  local frontmatter
-  frontmatter="$tiamat_frontmatter/\
-$(realpath --relative-to "$tiamat_source_path" -- "$(tiamat::srcpath "$srcfile")")"
-  [[ "$frontmatter" = ..* ]] && tiamat::assert
-
-  # put in file so that it shows up in backtrace
-  tiamat::mkparents "$frontmatter" || tiamat::assert
-  tiamat::read_frontmatter "$srcfile" > "$frontmatter"
-  tiamat::pushd "$srcfile"
-  tiamat::verbose "source $frontmatter"
-  builtin source "$frontmatter"
-  tiamat::popd
-}
-
 #################
 # file handlers #
 #################
@@ -937,11 +950,11 @@ function tiamat::build_plain {
 
     tiamat::verbose 'sourcing page'
     tiamat::source "$srcfile"
-    
+
     # the script itself contains the render_template call
     # it can also have multiple!
-    [[ "$tiamat_has_outputs" ]] || tiamat::log "warning: no pages output from $srcfile"
-    
+    [[ "$tiamat_has_outputs" ]] || tiamat::warn "no pages output from $srcfile"
+
     tiamat::unstrict
   )
 }
@@ -958,7 +971,7 @@ function tiamat::build_adoc {
     tiamat_permalink=$(tiamat::page_outpath "$srcfile")
 
     # eval frontmatter
-    tiamat::source_frontmatter "$srcfile"
+    tiamat::source "$srcfile"
 
     # render adoc
     tiamat::verbose 'rendering adoc'
@@ -983,7 +996,7 @@ function tiamat::build_sass {
   # ENDPARAMS
 
   # tiamat::require_tool sass 'building sass file'
-  
+
   local out
   out="$(tiamat::outpath_for "$srcfile")"
   out="$(tiamat::stripext "$out").css"
@@ -1031,7 +1044,7 @@ function tiamat::build_file {
 
   # if not, then process the file directly
   tiamat_source_file=$srcfile # for use by scripts
-  
+
   local nhandlers=$(( ${#tiamat_handlers[@]} / 2 ))
   local handled=''
   local i
@@ -1041,15 +1054,22 @@ function tiamat::build_file {
 
     if [[ "$srcfile" = $pat ]]; then
       handled=1
-      "$handler" "$srcfile"
+      if [[ "$tiamat_verbose" ]]; then
+        local oldtime="${TIMEFORMAT:-}"
+        export TIMEFORMAT="[tiamat $BASHPID] building page took %R seconds"
+        builtin time "$handler" "$srcfile"
+        export TIMEFORMAT="$oldtime"
+      else
+        "$handler" "$srcfile"
+      fi
       break
     fi
   done
-  
+
   exec {tiamat_depfd}>&- {tiamat_outfd}>&-
-  
+
   if [[ ! "$handled" ]]; then
-    tiamat::log "warning: non-ignored file not handled: $srcfile"
+    tiamat::warn "non-ignored file not handled: $srcfile"
     return 0
   fi
 
@@ -1069,15 +1089,16 @@ function tiamat::build_file_deps {
 
   local realsrc
   realsrc=$(tiamat::srcpath "$srcfile")
-  
+
   # skip build dir
-  # TODO: do this filter on the actual find
+  # TODO: do this filter in fswatch opts too
   [[ "$realsrc" = "$tiamat_output_path/"* ]] && return 0
-  
+
   tiamat::is_ignored "$srcfile" && return 0
 
   if [[ -e "$realsrc" ]]; then
     tiamat::log "detected change in $srcfile ..."
+    # tiamat::log "${tiamat_dependencies[@]}"
     if [[ "$realsrc" = "$tiamat_source_path/"* ]]; then
       tiamat::log "  rebuilding $srcfile"
       tiamat::build_file "$srcfile"
