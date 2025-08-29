@@ -62,7 +62,7 @@ tiamat_session=$(mktemp -p "$tiamat_temp" -d -t tiamat.XXXXXXXX)
 tiamat_depfile=$tiamat_session/dependencies
 tiamat_outfile=$tiamat_session/outputs
 tiamat_rundepfile=$tiamat_session/rundependencies
-tiamat_frontmatter=$tiamat_session/frontmatter
+tiamat_shadow=$tiamat_session/shadow_src
 
 #################
 # configuration #
@@ -94,7 +94,8 @@ tiamat_ignore=(
   'README*'
 )
 tiamat_handlers=(
-#  '*.@(md|markdown)'   tiamat::build_markdown
+  '*.md'        tiamat::build_markdown
+  '*.markdown'  tiamat::build_markdown
   '*.adoc'      tiamat::build_adoc
   '*.asciidoc'  tiamat::build_adoc
   '*.sass'      tiamat::build_sass
@@ -884,28 +885,69 @@ function tiamat::popd {
 # sourcing and frontmatter
 
 # strip frontmatter from between '---' tags for markup files and pipe out
+# frontmatter -> stderr, content -> stdout
 function tiamat::read_frontmatter {
   local srcfile=$1
   # ENDPARAMS
 
   awk '
-    $0 == "---" {
-      if (inblock) {
-        inblock = 0
-        exit
-      }
-      inblock = 1
+    # begin only on line 1
+    # TODO: intial blanks?
+    NR == 1 && $0 == "---" {
+      fm = 1
       next
     }
-    {
-      if (inblock) print $0
-      else exit
+
+    fm && $0 == "---" {
+      fm = 0
+      next
     }
+
+    {
+      if (fm)
+        print $0 > "/dev/stderr"
+      else
+        print $0 > "/dev/stdout"
+    }
+
     # if not closed, error
     END {
-      exit inblock
+      exit fm
     }
   ' "$(tiamat::srcpath "$srcfile")" || return $?
+}
+
+# mkdir's the parent dirs of a given file
+function tiamat::mkparents {
+  local path=$1
+  # ENDPARAMS
+
+  mkdir -p -- "$(dirname -- "$path")"
+}
+
+# convert a srcpath to a shadow path
+function tiamat::shadow_path {
+  local srcpath=$1
+  # ENDPARAMS
+  shift
+
+  local shadowpath
+  shadowpath="$tiamat_shadow/$(realpath -s --relative-to "$tiamat_source_path" -- "$(tiamat::srcpath "$srcpath")")"
+  [[ "$shadowpath" = ..* ]] && tiamat::assert
+
+  echo "$shadowpath"
+}
+
+# split frontmatter and src into separate files in shadow src
+function tiamat::shadow_split {
+  local srcpath=$1
+  # ENDPARAMS
+  shift
+
+  local shadowpath
+  shadowpath=$(tiamat::shadow_path "$srcpath")
+  tiamat::mkparents "$shadowpath" || tiamat::assert
+  tiamat::read_frontmatter "$path" 2> "$shadowpath.frontmatter" > "$shadowpath"
 }
 
 # source depth: if 0, we know we're running as the root template so
@@ -934,17 +976,13 @@ function tiamat::source {
 
     *.sh ) builtin source "$path" "$@" ;;
 
-    *.adoc | *.md ) # TODO
-      local frontmatter
-      frontmatter="$tiamat_frontmatter/\
-$(realpath -s --relative-to "$tiamat_source_path" -- "$path")"
-      [[ "$frontmatter" = ..* ]] && tiamat::assert
-
-      # put in file so that it shows up in backtrace
-      tiamat::mkparents "$frontmatter" || tiamat::assert
-      tiamat::read_frontmatter "$path" > "$frontmatter"
-      tiamat::verbose "frontmatter at $frontmatter"
-      builtin source "$frontmatter" "$@" || : # ignore status (if there's an actual error it should fail past this)
+    *.adoc | *.md )
+      local shadowpath
+      tiamat::shadow_split "$srcpath"
+      shadowpath=$(tiamat::shadow_path "$srcpath")
+      tiamat::verbose "frontmatter at $shadowpath.frontmatter"
+      # ignore status (if there's an actual error it should fail past this)
+      builtin source "$shadowpath.frontmatter" "$@" || :
     ;;
   esac
 
@@ -977,14 +1015,6 @@ function tiamat::extract {
 }
 
 # TODO: implement a way to do semantic sorting of files
-
-# mkdir's the parent dirs of a given file
-function tiamat::mkparents {
-  local path=$1
-  # ENDPARAMS
-
-  mkdir -p -- "$(dirname -- "$path")"
-}
 
 # dependencies
 
@@ -1119,6 +1149,37 @@ function tiamat::build_plain {
   )
 }
 
+function tiamat::build_markdown {
+  local srcfile=$1
+  # ENDPARAMS
+
+  (
+    tiamat::strict
+    # determine output file
+    declare -g tiamat_permalink
+    tiamat_permalink=$(tiamat::page_outpath "$srcfile")
+
+    # eval frontmatter
+    tiamat::source "$srcfile"
+
+    # render markdown
+    tiamat::verbose 'rendering markdown'
+    declare -g content
+    content=$(
+      command "${tiamat_md_cmd[@]}" \
+        "${tiamat_md_args[@]}" \
+        "$(tiamat::shadow_path "$srcfile")"
+        # TODO: be more explicit about this originating from ::shadow_split in ::source
+    )
+
+    # render page template
+    tiamat::verbose 'rendering page'
+    tiamat::render_template "$tiamat_permalink"
+
+    tiamat::unstrict
+  )
+}
+
 function tiamat::build_adoc {
   local srcfile=$1
   # ENDPARAMS
@@ -1134,13 +1195,14 @@ function tiamat::build_adoc {
     tiamat::source "$srcfile"
 
     # render adoc
-    tiamat::verbose 'rendering adoc'
+    tiamat::verbose 'rendering asciidoc'
     declare -g content
     content=$(
       command "${tiamat_adoc_cmd[@]}" \
         "${tiamat_adoc_args[@]}" \
         -o - \
-        "$(tiamat::srcpath "$srcfile")"
+        "$(tiamat::shadow_path "$srcfile")"
+        # TODO: be more explicit about this originating from ::shadow_split in ::source
     )
 
     # render page template
