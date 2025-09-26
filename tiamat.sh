@@ -106,6 +106,7 @@ tiamat_handlers=(
   '*.png'       tiamat::build_passthru
   '*.webp'      tiamat::build_passthru
   '*.svg'       tiamat::build_passthru
+  '*.gif'       tiamat::build_passthru
 )
 
 # tool options
