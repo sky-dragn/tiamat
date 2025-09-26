@@ -185,6 +185,7 @@ function tiamat::postconfig {
   # resolve paths
   tiamat_source_path=$(tiamat::srcpath "$tiamat_source_path")
   tiamat_output_path=$(tiamat::srcpath "$tiamat_output_path")
+  tiamat_sass_args+=(--load-path="$tiamat_source_path")
 }
 
 ###########
@@ -397,6 +398,12 @@ function tiamat::require_tool {
       tiamat::fail "required external tool not found: $tool"
     fi
   fi
+}
+
+# run an external command with verbose logging
+function tiamat::extern {
+  tiamat::verbose "running external command: $*"
+  command "$@"
 }
 
 # prefix all lines of stdin with a string for logging
@@ -670,11 +677,12 @@ function tiamat::markdown {
   # tiamat::require_tool marked 'rendering inline markdown'
 
   tiamat::argcat "$@" |
-    command "${tiamat_md_cmd[@]}" "${tiamat_md_args[@]}" |
+    tiamat::extern "${tiamat_md_cmd[@]}" "${tiamat_md_args[@]}" |
     tiamat::raw
 }
 
 # inline sass block - outputs a <style>
+# TODO: automatic dependencies for sass
 function tiamat::sass {
   # param @: sass source
   # ENDPARAMS
@@ -682,7 +690,7 @@ function tiamat::sass {
   # tiamat::require_tool sass 'building inline sass'
 
   tiamat::argcat "$@" |
-    command "${tiamat_sass_cmd[@]}" --stdin "${tiamat_sass_args[@]}" |
+    tiamat::extern "${tiamat_sass_cmd[@]}" --stdin "${tiamat_sass_args[@]}" |
     tiamat::rawtag style
 }
 
@@ -1166,7 +1174,7 @@ function tiamat::build_markdown {
     tiamat::verbose 'rendering markdown'
     declare -g content
     content=$(
-      command "${tiamat_md_cmd[@]}" \
+      tiamat::extern "${tiamat_md_cmd[@]}" \
         "${tiamat_md_args[@]}" \
         "$(tiamat::shadow_path "$srcfile")"
         # TODO: be more explicit about this originating from ::shadow_split in ::source
@@ -1198,7 +1206,7 @@ function tiamat::build_adoc {
     tiamat::verbose 'rendering asciidoc'
     declare -g content
     content=$(
-      command "${tiamat_adoc_cmd[@]}" \
+      tiamat::extern "${tiamat_adoc_cmd[@]}" \
         "${tiamat_adoc_args[@]}" \
         -o - \
         "$(tiamat::shadow_path "$srcfile")"
@@ -1225,7 +1233,7 @@ function tiamat::build_sass {
 
   tiamat::output "$out" || return 0
 
-  command "${tiamat_sass_cmd[@]}" \
+  tiamat::extern "${tiamat_sass_cmd[@]}" \
     "${tiamat_sass_args[@]}" \
     "$(tiamat::srcpath "$srcfile")" \
     "$(tiamat::outpath "$out")"
