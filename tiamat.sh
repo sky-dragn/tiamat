@@ -73,6 +73,7 @@ tiamat_verbose=''
 tiamat_dryrun=''
 tiamat_config='tiamat_config.sh'
 tiamat_use_npx=''
+tiamat_build_drafts=''
 
 # file handling
 tiamat_root_path="$(realpath -s -- "$(dirname -- "${BASH_SOURCE[0]}")")" # dir containing tiamat.sh
@@ -187,6 +188,8 @@ function tiamat::postconfig {
   tiamat_source_path=$(tiamat::srcpath "$tiamat_source_path")
   tiamat_output_path=$(tiamat::srcpath "$tiamat_output_path")
   tiamat_sass_args+=(--load-path="$tiamat_source_path")
+
+  [[ "$tiamat_build_drafts" ]] || tiamat_ignore+=('*.draft' '*.draft.*')
 }
 
 ###########
@@ -1502,6 +1505,7 @@ while [[ "$#" -gt 0 ]]; do
     -v | --verbose ) tiamat_verbose=1 ;;
     -n | --dryrun  ) tiamat_dryrun=1 ;;
     -x | --npx     ) tiamat_use_npx=1 ;;
+    -d | --drafts  ) tiamat_build_drafts=1 ;;
     -c | --config  )
       shift
       tiamat_config=$1 || tiamat::show_usage 1
