@@ -102,6 +102,7 @@ tiamat_handlers=(
   '*.sass'      tiamat::build_sass
   '*.scss'      tiamat::build_sass
   '*.html.sh'   tiamat::build_plain
+  # TODO: regular .sh should not warn
   '*.css'       tiamat::build_passthru
   '*.jpg'       tiamat::build_passthru
   '*.png'       tiamat::build_passthru
@@ -222,6 +223,17 @@ function tiamat::arrstr_matches {
     [[ "$needle" = $pat ]] && return 0
   done <<< "$haystack"
   return 1
+}
+
+# print with delimiters
+function tiamat::arr_print {
+  printf '('
+  while [[ "$#" -gt 1 ]]; do
+    printf '%s, ' "$1"
+    shift
+  done
+  [[ "$#" -eq 1 ]] && printf '%s' "$1"
+  printf ')'
 }
 
 ######################################
@@ -610,6 +622,8 @@ function tiamat::begin {
     tiamat_element_stack+=("$element")
   fi
 
+  tiamat::verbose "$(tiamat::arr_print "${tiamat_element_stack[@]}")"
+
   # if content specified, output it and close if it's text
   case "${content[0]:-}" in
     # plain content specified: output and close
@@ -653,6 +667,8 @@ function tiamat::end {
     element=(${tiamat_element_stack[-1]}) # expand!
     unset 'tiamat_element_stack[-1]'
   fi
+
+  tiamat::verbose "$(tiamat::arr_print "${tiamat_element_stack[@]}")"
 
   for el in "${element[@]}"; do
     tiamat::raw "</$el>"
@@ -1150,6 +1166,8 @@ function tiamat::build_plain {
     tiamat_permalink=$(tiamat::page_outpath "$srcfile")
 
     tiamat_sourcedepth=0
+
+    declare -g content=''
 
     tiamat::verbose 'sourcing page'
     tiamat::source "$srcfile"
