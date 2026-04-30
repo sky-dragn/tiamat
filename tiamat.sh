@@ -463,12 +463,17 @@ function tiamat::time {
 
   TIMEFORMAT='%R'
   # shellcheck disable=SC2261 # time is just weird like that
-  { time "$@" >& "$tmpstdout" 2>& "$tmpstderr"; } 2> "$tmp"
+  local status=0
+  tiamat::verbose time_pre
+  { time "$@" >& "$tmpstdout" 2>& "$tmpstderr"; } 2> "$tmp" || status=$?
+  tiamat::verbose time_post
 
   # close dups
   exec {tmpstdout}>&- {tmpstderr}>&-
 
   tiamat_time=$(< "$tmp")
+
+  return "$status"
 }
 
 ##############
@@ -532,12 +537,14 @@ function tiamat::void {
       .* )
         [[ "${attrs[class]:-}" ]] && attrs[class]+=' ' # separate w/ spaces
         attrs[class]+=${arg:1} # remove .
-        tiamat::arr_contains class "${attr_order[@]}" || attr_order+=(class)
+        tiamat::arr_contains class "${attr_order[@]}" ||
+          attr_order+=(class)
       ;;
 
       \#* )
         attrs[id]=${arg:1}
-        tiamat::arr_contains id "${attr_order[@]}" || attr_order+=(id)
+        tiamat::arr_contains id "${attr_order[@]}" ||
+          attr_order+=(id)
       ;;
 
       =* | +* ) tiamat::fail 'cannot set content for void tag' ;;
@@ -546,19 +553,22 @@ function tiamat::void {
         local attr=${arg%%+=*}
         local val=${arg#*+=}
         attrs[$attr]+=$val
-        tiamat::arr_contains "$attr" "${attr_order[@]}" || attr_order+=("$attr")
+        tiamat::arr_contains "$attr" "${attr_order[@]}" ||
+          attr_order+=("$attr")
       ;;
 
       *=* )
         local attr=${arg%%=*}
         local val=${arg#*=}
         attrs[$attr]=$val
-        tiamat::arr_contains "$attr" "${attr_order[@]}" || attr_order+=("$attr")
+        tiamat::arr_contains "$attr" "${attr_order[@]}" ||
+          attr_order+=("$attr")
       ;;
 
       * )
         attrs[$arg]=''
-        tiamat::arr_contains "$arg" "${attr_order[@]}" || attr_order+=("$arg")
+        tiamat::arr_contains "$arg" "${attr_order[@]}" ||
+          attr_order+=("$arg")
       ;;
     esac
   done
@@ -1254,6 +1264,7 @@ function tiamat::build_sass {
   out="$(tiamat::stripext "$out").css"
 
   tiamat::output "$out" || return 0
+  tiamat::output "$out.map" || return 0 # TODO: option
 
   tiamat::extern "${tiamat_sass_cmd[@]}" \
     "${tiamat_sass_args[@]}" \
@@ -1301,6 +1312,7 @@ function tiamat::build_file {
 
   local nhandlers=$(( ${#tiamat_handlers[@]} / 2 ))
   local handled=''
+  local status=0
   local i
   for (( i=0; i<nhandlers; i++ )); do
     local pat=${tiamat_handlers[$((i*2))]}
@@ -1309,7 +1321,7 @@ function tiamat::build_file {
     # shellcheck disable=SC2053
     if [[ "$srcfile" = $pat ]]; then
       handled=1
-      tiamat::time "$handler" "$srcfile"
+      tiamat::time "$handler" "$srcfile" || status=$?
       break
     fi
   done
@@ -1321,6 +1333,14 @@ function tiamat::build_file {
     return 0
   fi
 
+  if [[ "$status" -ne 0 ]]; then
+    tiamat::loggroup "$srcfile -> ??? (${tiamat_time}s)"
+    tiamat::log "BUILD FAILED"
+    tiamat::verbose "$status"
+    tiamat::endgroup
+    return "$status"
+  fi
+
   # store deps and list of output files
   tiamat_dependencies[$srcfile]=$(<"$tiamat_depfile")
   tiamat_rundeps[$srcfile]=$(<"$tiamat_rundepfile")
@@ -1329,8 +1349,9 @@ function tiamat::build_file {
   outs=$(< "$tiamat_outfile")
   case "$(wc -l <<< "$outs")" in
     0 )
-      tiamat::log "$srcfile -> ??? (${tiamat_time}s)"
+      tiamat::loggroup "$srcfile -> ??? (${tiamat_time}s)"
       tiamat::warn "no pages output from $srcfile"
+      tiamat::endgroup
     ;;
     1 )
       tiamat::log "$srcfile -> $outs (${tiamat_time}s)"
@@ -1369,7 +1390,12 @@ function tiamat::build_file_deps {
     tiamat::loggroup "detected change in $srcfile, rebuilding dependents ..."
     # tiamat::log "${tiamat_dependencies[@]}"
     [[ "$realsrc" = "$tiamat_source_path/"* ]] &&
-      tiamat::build_file "$srcfile"
+      local status=0
+      tiamat::build_file "$srcfile" || status=$?
+      if [[ "$status" -ne 0 ]]; then
+        tiamat::endgroup
+        return "$status"
+      fi
 
     local dependent
     for dependent in "${!tiamat_dependencies[@]}"; do
@@ -1377,7 +1403,12 @@ function tiamat::build_file_deps {
       [[ "$dependent" = "$srcfile" ]] && continue
 
       if tiamat::arrstr_matches "$srcfile" "${tiamat_dependencies[$dependent]}"; then
-        tiamat::build_file "$dependent"
+        local status=0
+        tiamat::build_file "$dependent" || status=$?
+        if [[ "$status" -ne 0 ]]; then
+          tiamat::endgroup
+          return "$status"
+        fi
       fi
     done
     tiamat::endgroup
@@ -1400,7 +1431,7 @@ function tiamat::build_files {
   local file
   while IFS= read -rd $'\0' file; do
     tiamat::verbose "$file"
-    tiamat::build_file "$(tiamat::to_srcpath "$file")"
+    tiamat::build_file "$(tiamat::to_srcpath "$file")" || return
   done
 }
 
@@ -1416,7 +1447,7 @@ function tiamat::build_files_deps {
 
     local f
     f=$(tiamat::to_srcpath "$file")
-    tiamat::build_file_deps "$f"
+    tiamat::build_file_deps "$f" || :
   done
 }
 
@@ -1437,8 +1468,14 @@ function tiamat::build_site {
     mkdir -p "$tiamat_output_path"
 
     tiamat::loggroup 'building site'
-    tiamat::time < <(find "$tiamat_source_path" -type f -print0) tiamat::build_files
+    local status=0
+    tiamat::time < <(find "$tiamat_source_path" -type f -print0) tiamat::build_files || status=$?
+
     tiamat::endgroup
+    if [[ "$status" -ne 0 ]]; then
+      tiamat::log "failed to build site in $tiamat_time seconds"
+      return "$status"
+    fi
     tiamat::log "built site in $tiamat_time seconds"
   fi
 }
@@ -1469,7 +1506,7 @@ function tiamat::serve_site {
   # tiamat::require_tool live-server "running live server"
 
   # ensure site is built before serving
-  tiamat::build_site
+  tiamat::build_site || return
 
   tiamat::loggroup 'serving site'
 
@@ -1498,6 +1535,7 @@ global opts:
   -h --help: show this help
   -v --verbose: show extra logging info
   -n --dryrun: don't actually modify files
+  -d --drafts: build draft pages
   -c --config: specify config path (reads tiamat_config.sh by default)
   -x --npx: access js-based tools using npx
 commands:
@@ -1548,8 +1586,8 @@ if [[ ! "$tiamat_sourced" ]]; then
     version ) tiamat::show_version "$@" ;;
     help    ) tiamat::show_usage 0 ;;
 
-    build   ) tiamat::build_site "$@" ;;
-    serve   ) tiamat::serve_site "$@" ;;
+    build   ) tiamat::build_site "$@" || exit ;;
+    serve   ) tiamat::serve_site "$@" || exit ;;
 
     *       ) tiamat::show_usage 1 ;;
   esac
